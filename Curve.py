@@ -143,7 +143,7 @@ def detect_graph_area(edges, gray_image, image_width):
     """Finds the graph area on the rightmost 1/4 of the image."""
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     graph_areas = []
-    min_x_threshold = image_width * 0.75  # Rightmost 1/4
+    min_x_threshold = image_width * 0.7  # Rightmost 1/4
 
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
@@ -565,8 +565,8 @@ def rename_images_based_on_red_curve(parent_folder_path):
                     graph_area = detect_graph_area(edges, gray, image_width)
                     if graph_area is not None:
                         x, y, w, h = graph_area
-                        print(graph_area)
-                        ocr_roi = ocr_image[y:h+300, x:x+w-300]
+                        
+                        ocr_roi = ocr_image[y:y+h, x:x+112]
                     else:
                         ocr_roi = ocr_image
                     gray_ocr = cv2.cvtColor(ocr_roi, cv2.COLOR_BGR2GRAY)
@@ -579,6 +579,7 @@ def rename_images_based_on_red_curve(parent_folder_path):
 
                     # Check if OCR text contains any digit
                     if any(char.isdigit() for char in text):
+                        print(dir_name, text)
                         # Extract numbers from text
                         numbers = [int(num) for num in text.split() if num.isdigit()]
                         if len(numbers) >= 2:
@@ -590,7 +591,19 @@ def rename_images_based_on_red_curve(parent_folder_path):
                             }
                             print(f"Found axio values for {dir_name} - dei: {numbers[0]}, izq: {numbers[1]}")
                             print(f"Current patient_axio_values dictionary: {patient_axio_values}")  # Debug log
-                        new_name = base_path + " AXIO.png"
+                        if not os.path.exists(base_path + " AXIO.png"):
+                            new_name = base_path + " AXIO.png"
+                        else:
+                            new_name_ai = base_path + " AI.png"
+                            new_name_bi = base_path + " BI.png"
+                            print("Here", new_name_ai, new_name_bi)
+                            if not os.path.exists(new_name_ai):
+                                new_name = new_name_ai
+                            elif not os.path.exists(new_name_bi):
+                                new_name = new_name_bi
+                            else:
+                                # If both AI and BI exist, skip renaming the image
+                                new_name = None
                     else:
                         new_name_ai = base_path + " AI.png"
                         new_name_bi = base_path + " BI.png"
@@ -622,9 +635,6 @@ def select_parent_folder():
 root = tk.Tk()
 root.title("Graph Processing Tool")
 root.geometry("500x400")
-
-# btn_select_single_folder = tk.Button(root, text="Seleccione la ruta (Single Folder)", command=select_single_folder, font=("Arial", 12))
-# btn_select_single_folder.pack(pady=10)
 
 btn_select_parent_folder = tk.Button(root, text="Multi-Calculate (All Subfolders)", command=select_parent_folder, font=("Arial", 12))
 btn_select_parent_folder.pack(pady=10)

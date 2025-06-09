@@ -65,3 +65,8 @@ You have already implemented the following:
 
  ∘ Functional segmentation by segments T1 to T4
  ∘ Intraindividual angular comparisons, without population-level extrapolation
+
+
+
+ ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ pyinstaller --onefile --noconsole --icon=app_icon.ico --add-data "C:\\Program Files\\Tesseract-OCR;tesseract" main.py
