@@ -42,9 +42,6 @@ def merge_bounding_boxes(boxes):
     y_max = max(box[1] + box[3] for box in boxes)
     return (x_min, y_min, x_max - x_min, y_max - y_min)
 
-import openpyxl
-from openpyxl.styles import Font, Alignment, PatternFill
-import os
 
 def save_blue_dots_to_csv(patient_name, all_sections_data, result_folder):
     """Saves blue dot angles into result.xlsx, updating existing patient row or appending if new."""
@@ -138,8 +135,7 @@ def save_blue_dots_to_csv(patient_name, all_sections_data, result_folder):
     wb.save(excel_filename)
     print(f"Data saved to {excel_filename}")
     return excel_filename
-
-def detect_graph_area(edges, gray_image, image_width):
+def detect_graph(edges, gray_image, image_width):
     """Finds the graph area on the rightmost 1/4 of the image."""
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     graph_areas = []
@@ -151,6 +147,95 @@ def detect_graph_area(edges, gray_image, image_width):
             graph_areas.append((x, y, w, h))
 
     return merge_bounding_boxes(graph_areas)
+
+def detect_graph_area(edges, gray_image, image_width, original_image=None):
+    """Finds the graph area by detecting the boundary between text and graph regions using OCR and color analysis."""
+    # Get the right 1/4 of the image for analysis
+    right_quarter_start = int(image_width * 0.75)
+    right_roi = gray_image[:, right_quarter_start:]
+    
+    # Use OCR to detect text regions in the right quarter
+    try:
+        # Configure OCR to detect text regions
+        custom_config = r'--oem 3 --psm 6'
+        
+        # Get bounding boxes of detected text
+        data = pytesseract.image_to_data(right_roi, config=custom_config, output_type=pytesseract.Output.DICT)
+        
+        # Find the leftmost x-coordinate of detected text in the right quarter
+        min_x_threshold = image_width
+        for i in range(len(data['text'])):
+            if int(data['conf'][i]) > 30:  # Only consider confident detections
+                x = data['left'][i] + right_quarter_start  # Adjust x coordinate relative to full image
+                if x < min_x_threshold:
+                    min_x_threshold = x
+        
+        # If no text detected, fall back to analyzing color changes
+        if min_x_threshold == image_width:
+            min_x_threshold = detect_color_boundary(gray_image, image_width)
+            
+    except Exception as e:
+        print(f"OCR failed, using color boundary detection: {e}")
+        min_x_threshold = detect_color_boundary(gray_image, image_width)
+    
+    # Ensure threshold is at least 3/4 of image width (original behavior as fallback)
+    min_x_threshold = min(min_x_threshold, image_width * 0.75)
+    
+    # Draw red vertical line to show detected graph area boundary
+    if original_image is not None:
+        image_height = original_image.shape[0]
+        # Convert to integer to avoid OpenCV error
+        x_pos = int(min_x_threshold)
+        cv2.line(original_image, (x_pos, 0), (x_pos, image_height), (0, 0, 255), 3)
+        # Add text label for the boundary line
+        # cv2.putText(original_image, f"Graph Area: x={x_pos}", 
+        #            (x_pos + 5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+    
+    # Find contours in the graph area
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    graph_areas = []
+
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w > 10 and h > 10 and x > min_x_threshold and is_white_background(gray_image, x, y, w, h):
+            graph_areas.append((min_x_threshold, y, w, h))
+
+    return merge_bounding_boxes(graph_areas)
+
+def detect_color_boundary(gray_image, image_width):
+    """Detects the boundary between text and graph areas by analyzing color changes."""
+    image_height = gray_image.shape[0]
+    
+    # Analyze horizontal strips to find color transitions
+    strip_height = image_height // 10  # Divide image into 10 horizontal strips
+    boundary_candidates = []
+    
+    for strip_start in range(0, image_height - strip_height, strip_height):
+        strip = gray_image[strip_start:strip_start + strip_height, :]
+        
+        # Calculate mean intensity for each column
+        column_means = np.mean(strip, axis=0)
+        
+        # Find significant changes in intensity (transitions from text to background)
+        diff = np.diff(column_means)
+        
+        # Look for transitions from darker (text) to lighter (background)
+        for i in range(len(diff)):
+            if diff[i] > 30:  # Significant increase in brightness
+                # Check if this is a sustained change (not just noise)
+                if i + 50 < len(column_means):
+                    before_mean = np.mean(column_means[max(0, i-20):i])
+                    after_mean = np.mean(column_means[i:i+50])
+                    if after_mean - before_mean > 40:  # Sustained brightness increase
+                        boundary_candidates.append(i)
+                        break
+    
+    # If we found boundary candidates, use the median
+    if boundary_candidates:
+        return int(np.median(boundary_candidates))
+    else:
+        # Fallback to original 1/4 method if no clear boundary found
+        return int(image_width * 0.25)
 
 def detect_blue_points(image, roi):
     """Detects isolated blue points while filtering out connected regions (lines)."""
@@ -253,69 +338,6 @@ def detect_red_curve(image, roi):
 
     return red_curve_points
 
-def detect_red_rectangles(image, roi=None):
-    """Detects rectangles with red borders and calculates their areas."""
-    if roi is None:
-        # Use the entire image if no ROI is specified
-        roi_image = image
-        offset_x, offset_y = 0, 0
-    else:
-        x, y, w, h = roi
-        roi_image = image[y:y+h, x:x+w]
-        offset_x, offset_y = x, y
-    
-    # Convert to HSV color space
-    hsv = cv2.cvtColor(roi_image, cv2.COLOR_BGR2HSV)
-    
-    # Define red color range (considering both lower and upper red hues)
-    lower_red1 = np.array([0, 120, 70])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 120, 70])
-    upper_red2 = np.array([180, 255, 255])
-    
-    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    mask = cv2.bitwise_or(mask1, mask2)
-    
-    # Apply morphological operations to clean up the mask
-    kernel = np.ones((3,3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    
-    # Find contours
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    rectangles = []
-    for cnt in contours:
-        # Approximate the contour to a polygon
-        epsilon = 0.02 * cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
-        
-        # Check if the approximated contour has 4 vertices (rectangle-like)
-        if len(approx) >= 4:
-            # Get bounding rectangle
-            x, y, w, h = cv2.boundingRect(cnt)
-            
-            # Filter out very small rectangles (noise)
-            if w > 20 and h > 20:
-                # Calculate area
-                area = w * h
-                
-                # Adjust coordinates for the original image
-                rect_x = x + offset_x
-                rect_y = y + offset_y
-                
-                rectangles.append({
-                    'x': rect_x,
-                    'y': rect_y,
-                    'width': w,
-                    'height': h,
-                    'area': area,
-                    'contour': cnt
-                })
-    
-    return rectangles
-
 def detect_axes(image, roi):
     """Finds and marks perpendicular x and y axes using thick black lines."""
     if roi is None:
@@ -364,7 +386,7 @@ def process_image(input_path, save_path, all_sections_data=None):
     image, gray, edges = preprocess_image(input_path)
     image_height, image_width = image.shape[:2]
 
-    graph_area = detect_graph_area(edges, gray, image_width)
+    graph_area = detect_graph(edges, gray, image_width)
     graph_sections = split_graph_area(graph_area, gray)
 
     # Parse patient name and record type from filename
@@ -379,9 +401,6 @@ def process_image(input_path, save_path, all_sections_data=None):
     # print("~~~~~~~~~~", record_type)
     # Check if record_type is known, else warn but keep original
     valid_record_types = {"AD", "AI", "BD", "BI"}
-    if record_type not in valid_record_types:
-        print(f"Warning: record_type '{record_type}' not recognized.")
-        # Keep record_type as is
 
     # Prepare a dictionary to hold all record types' sections data if not provided
     if all_sections_data is None:
@@ -398,37 +417,6 @@ def process_image(input_path, save_path, all_sections_data=None):
         "BI": {0: "BD", 1: "BI"}
     }
     # Detect red rectangles in the entire image
-    red_rectangles = detect_red_rectangles(image)
-    
-    # Draw red rectangles and display their areas
-    for rect in red_rectangles:
-        x, y, w, h = rect['x'], rect['y'], rect['width'], rect['height']
-        area = rect['area']
-        
-        # Draw rectangle border in green (to distinguish from red content)
-        cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        
-        # Display area text
-        area_text = f"Area: {area} px²"
-        text_x = x + 5
-        text_y = y - 10 if y > 30 else y + h + 20
-        
-        # Add background rectangle for text visibility
-        text_size = cv2.getTextSize(area_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-        cv2.rectangle(image, (text_x - 2, text_y - text_size[1] - 5), 
-                     (text_x + text_size[0] + 2, text_y + 5), (255, 255, 255), -1)
-        cv2.rectangle(image, (text_x - 2, text_y - text_size[1] - 5), 
-                     (text_x + text_size[0] + 2, text_y + 5), (0, 0, 0), 1)
-        
-        # Draw area text
-        cv2.putText(image, area_text, (text_x, text_y), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2, cv2.LINE_AA)
-    
-    # Log detected rectangles
-    if red_rectangles:
-        log_message(f"Detected {len(red_rectangles)} red rectangles in {filename}")
-        for i, rect in enumerate(red_rectangles):
-            log_message(f"  Rectangle {i+1}: {rect['width']}x{rect['height']} pixels, Area: {rect['area']} px²")
     
     section_index_const = -1
     for section_index, roi in enumerate(graph_sections):
@@ -658,11 +646,11 @@ def rename_images_based_on_red_curve(parent_folder_path):
                     image_height, image_width = image.shape[:2]
 
                     ocr_image = cv2.imread(input_path)
-                    graph_area = detect_graph_area(edges, gray, image_width)
+                    graph_area = detect_graph_area(edges, gray, image_width, ocr_image)
                     if graph_area is not None:
                         x, y, w, h = graph_area
-                        
-                        ocr_roi = ocr_image[y:y+h, x:x+250]
+                        print(x, y, w, h)
+                        ocr_roi = ocr_image[int(y):int(y)+int(h), int(x):int(x)+300]
 
                     else:
                         ocr_roi = ocr_image
@@ -676,24 +664,28 @@ def rename_images_based_on_red_curve(parent_folder_path):
 
                     # Check if OCR text contains any digit
                     if any(char.isdigit() for char in text):
-                        print(dir_name, text)
                         # Extract numbers from text
-                        numbers = [int(num) for num in text.split() if num.isdigit()]
-                        if len(numbers) >= 2:
+                        numbers = [int(num) for num in text.split() if int(num)>=10]
+                        print(dir_name, numbers)
+                        if len(numbers) >= 1 and not os.path.exists(base_path + " AXIO.png"):
                             # Store axio values for this patient
                             dir_name = os.path.basename(subfolder_path).upper()  # Convert to uppercase to match patient name format
-                            patient_axio_values[dir_name] = {
-                                'dei': float(numbers[0]),
-                                'izq': float(numbers[1])
-                            }
-                            print(f"Found axio values for {dir_name} - dei: {numbers[0]}, izq: {numbers[1]}")
+                            if len(numbers) == 1:
+                                patient_axio_values[dir_name] = {
+                                    'dei': float(numbers[0]),
+                                    'izq': 'OCR_Error'
+                                }
+                            else:
+                                patient_axio_values[dir_name] = {
+                                    'dei': float(numbers[0]),
+                                    'izq': float(numbers[1])
+                                }
+                            # print(f"Found axio values for {dir_name} - dei: {numbers[0]}, izq: {numbers[1]}")
                             print(f"Current patient_axio_values dictionary: {patient_axio_values}")  # Debug log
-                        if not os.path.exists(base_path + " AXIO.png"):
                             new_name = base_path + " AXIO.png"
                         else:
                             new_name_ai = base_path + " AI.png"
                             new_name_bi = base_path + " BI.png"
-                            print("Here", new_name_ai, new_name_bi)
                             if not os.path.exists(new_name_ai):
                                 new_name = new_name_ai
                             elif not os.path.exists(new_name_bi):
@@ -704,14 +696,13 @@ def rename_images_based_on_red_curve(parent_folder_path):
                     else:
                         new_name_ai = base_path + " AI.png"
                         new_name_bi = base_path + " BI.png"
-                        print("Here", new_name_ai, new_name_bi)
                         if not os.path.exists(new_name_ai):
                             new_name = new_name_ai
                         elif not os.path.exists(new_name_bi):
                             new_name = new_name_bi
                         else:
                             # If both AI and BI exist, skip renaming the image
-                            new_name = None
+                            new_name = base_path + " AXIO.png"
                     # Rename file if different and new_name is not None
                     if new_name and os.path.abspath(input_path) != os.path.abspath(new_name):
                         try:
