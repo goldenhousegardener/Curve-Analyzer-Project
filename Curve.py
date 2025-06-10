@@ -253,6 +253,69 @@ def detect_red_curve(image, roi):
 
     return red_curve_points
 
+def detect_red_rectangles(image, roi=None):
+    """Detects rectangles with red borders and calculates their areas."""
+    if roi is None:
+        # Use the entire image if no ROI is specified
+        roi_image = image
+        offset_x, offset_y = 0, 0
+    else:
+        x, y, w, h = roi
+        roi_image = image[y:y+h, x:x+w]
+        offset_x, offset_y = x, y
+    
+    # Convert to HSV color space
+    hsv = cv2.cvtColor(roi_image, cv2.COLOR_BGR2HSV)
+    
+    # Define red color range (considering both lower and upper red hues)
+    lower_red1 = np.array([0, 120, 70])
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([170, 120, 70])
+    upper_red2 = np.array([180, 255, 255])
+    
+    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    mask = cv2.bitwise_or(mask1, mask2)
+    
+    # Apply morphological operations to clean up the mask
+    kernel = np.ones((3,3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    
+    # Find contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    rectangles = []
+    for cnt in contours:
+        # Approximate the contour to a polygon
+        epsilon = 0.02 * cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        
+        # Check if the approximated contour has 4 vertices (rectangle-like)
+        if len(approx) >= 4:
+            # Get bounding rectangle
+            x, y, w, h = cv2.boundingRect(cnt)
+            
+            # Filter out very small rectangles (noise)
+            if w > 20 and h > 20:
+                # Calculate area
+                area = w * h
+                
+                # Adjust coordinates for the original image
+                rect_x = x + offset_x
+                rect_y = y + offset_y
+                
+                rectangles.append({
+                    'x': rect_x,
+                    'y': rect_y,
+                    'width': w,
+                    'height': h,
+                    'area': area,
+                    'contour': cnt
+                })
+    
+    return rectangles
+
 def detect_axes(image, roi):
     """Finds and marks perpendicular x and y axes using thick black lines."""
     if roi is None:
@@ -334,6 +397,39 @@ def process_image(input_path, save_path, all_sections_data=None):
         "AI": {0: "AD", 1: "AI"},
         "BI": {0: "BD", 1: "BI"}
     }
+    # Detect red rectangles in the entire image
+    red_rectangles = detect_red_rectangles(image)
+    
+    # Draw red rectangles and display their areas
+    for rect in red_rectangles:
+        x, y, w, h = rect['x'], rect['y'], rect['width'], rect['height']
+        area = rect['area']
+        
+        # Draw rectangle border in green (to distinguish from red content)
+        cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        
+        # Display area text
+        area_text = f"Area: {area} px²"
+        text_x = x + 5
+        text_y = y - 10 if y > 30 else y + h + 20
+        
+        # Add background rectangle for text visibility
+        text_size = cv2.getTextSize(area_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        cv2.rectangle(image, (text_x - 2, text_y - text_size[1] - 5), 
+                     (text_x + text_size[0] + 2, text_y + 5), (255, 255, 255), -1)
+        cv2.rectangle(image, (text_x - 2, text_y - text_size[1] - 5), 
+                     (text_x + text_size[0] + 2, text_y + 5), (0, 0, 0), 1)
+        
+        # Draw area text
+        cv2.putText(image, area_text, (text_x, text_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2, cv2.LINE_AA)
+    
+    # Log detected rectangles
+    if red_rectangles:
+        log_message(f"Detected {len(red_rectangles)} red rectangles in {filename}")
+        for i, rect in enumerate(red_rectangles):
+            log_message(f"  Rectangle {i+1}: {rect['width']}x{rect['height']} pixels, Area: {rect['area']} px²")
+    
     section_index_const = -1
     for section_index, roi in enumerate(graph_sections):
         v_line, h_line, intersection = detect_axes(image, roi)
@@ -565,8 +661,9 @@ def rename_images_based_on_red_curve(parent_folder_path):
                     graph_area = detect_graph_area(edges, gray, image_width)
                     if graph_area is not None:
                         x, y, w, h = graph_area
-                        print(graph_area)
-                        ocr_roi = ocr_image[y:h+300, x:x+w-300]
+                        
+                        ocr_roi = ocr_image[y:y+h, x:x+250]
+
                     else:
                         ocr_roi = ocr_image
                     gray_ocr = cv2.cvtColor(ocr_roi, cv2.COLOR_BGR2GRAY)
@@ -579,6 +676,7 @@ def rename_images_based_on_red_curve(parent_folder_path):
 
                     # Check if OCR text contains any digit
                     if any(char.isdigit() for char in text):
+                        print(dir_name, text)
                         # Extract numbers from text
                         numbers = [int(num) for num in text.split() if num.isdigit()]
                         if len(numbers) >= 2:
@@ -590,7 +688,19 @@ def rename_images_based_on_red_curve(parent_folder_path):
                             }
                             print(f"Found axio values for {dir_name} - dei: {numbers[0]}, izq: {numbers[1]}")
                             print(f"Current patient_axio_values dictionary: {patient_axio_values}")  # Debug log
-                        new_name = base_path + " AXIO.png"
+                        if not os.path.exists(base_path + " AXIO.png"):
+                            new_name = base_path + " AXIO.png"
+                        else:
+                            new_name_ai = base_path + " AI.png"
+                            new_name_bi = base_path + " BI.png"
+                            print("Here", new_name_ai, new_name_bi)
+                            if not os.path.exists(new_name_ai):
+                                new_name = new_name_ai
+                            elif not os.path.exists(new_name_bi):
+                                new_name = new_name_bi
+                            else:
+                                # If both AI and BI exist, skip renaming the image
+                                new_name = None
                     else:
                         new_name_ai = base_path + " AI.png"
                         new_name_bi = base_path + " BI.png"
@@ -620,16 +730,91 @@ def select_parent_folder():
 
 # UI Setup
 root = tk.Tk()
-root.title("Graph Processing Tool")
-root.geometry("500x400")
+root.title("Herramienta de Procesamiento de Gráficos")  # Spanish title
+root.geometry("500x500")  # Set to 500x500 as requested
+root.minsize(400, 400)    # Flexible minimum size
 
-# btn_select_single_folder = tk.Button(root, text="Seleccione la ruta (Single Folder)", command=select_single_folder, font=("Arial", 12))
-# btn_select_single_folder.pack(pady=10)
+# Add transparency to window
+root.attributes('-alpha', 0.95)  # 95% opacity for transparency
 
-btn_select_parent_folder = tk.Button(root, text="Multi-Calculate (All Subfolders)", command=select_parent_folder, font=("Arial", 12))
-btn_select_parent_folder.pack(pady=10)
+# Center window on screen
+window_width = 500
+window_height = 500
+screen_width = root.winfo_screenwidth()
+screen_height = root.winfo_screenheight()
+center_x = int(screen_width/2 - window_width/2)
+center_y = int(screen_height/2 - window_height/2)
+root.geometry(f'{window_width}x{window_height}+{center_x}+{center_y}')
 
-log_text = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=60, height=20, font=("Arial", 10))
-log_text.pack(pady=10)
+# Configure root background with transparency color
+root.configure(bg="#f8f9fa")
+
+# Consistent padding value for all elements
+padding = 15
+
+# Add main frame with consistent padding
+main_frame = tk.Frame(root, padx=padding, pady=padding, bg="#f8f9fa")
+main_frame.pack(fill=tk.BOTH, expand=True)
+
+# Style the button with primary color
+btn_select_parent_folder = tk.Button(
+    main_frame, 
+    text="Multi-Calcular (Todas las Subcarpetas)",  # Spanish text
+    command=select_parent_folder, 
+    font=("Arial", 12, "bold"),
+    bg="#007bff",      # Primary blue color
+    fg="white",        # White text
+    activebackground="#0056b3",  # Darker blue for active state
+    activeforeground="white",
+    relief=tk.RAISED,
+    bd=2,
+    padx=padding,
+    pady=padding,
+    cursor="hand2"     # Hand cursor on hover
+)
+btn_select_parent_folder.pack(pady=padding)
+
+# Style the log text widget with Spanish label
+log_label = tk.Label(
+    main_frame,
+    text="Registro de Actividades:",  # Spanish label
+    font=("Arial", 11, "bold"),
+    bg="#f8f9fa",
+    fg="#333333"
+)
+log_label.pack(anchor="w", pady=(0, padding//2))
+
+# Log frame with consistent styling
+log_frame = tk.Frame(
+    main_frame,
+    bd=1,
+    relief=tk.SOLID,
+    padx=padding//2,
+    pady=padding//2,
+    bg="#e9ecef"  # Light gray background
+)
+log_frame.pack(fill=tk.BOTH, expand=True)
+
+# Styled scrolled text widget
+log_text = scrolledtext.ScrolledText(
+    log_frame,
+    wrap=tk.WORD,
+    width=50,
+    height=20,
+    font=("Arial", 10),
+    bg="white",
+    fg="#212529",  # Dark gray text
+    padx=padding,
+    pady=padding,
+    selectbackground="#007bff",  # Blue selection background
+    selectforeground="white",    # White text when selected
+    insertbackground="#007bff"   # Blue cursor
+)
+log_text.pack(fill=tk.BOTH, expand=True, padx=padding//3, pady=padding//3)
+
+# Add initial Spanish welcome message
+log_text.insert(tk.END, "¡Bienvenido a la Herramienta de Procesamiento de Gráficos!\n")
+log_text.insert(tk.END, "Seleccione una carpeta para comenzar el procesamiento...\n\n")
+log_text.see(tk.END)
 
 root.mainloop()
